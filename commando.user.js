@@ -11,8 +11,8 @@
 // @connect      eios-e526f-default-rtdb.europe-west1.firebasedatabase.app
 // @connect      *
 // @run-at       document-end
-// @updateURL https://github.com/Bobnarva/moodle-commando.git
-// @downloadURL https://github.com/Bobnarva/moodle-commando.git
+// @updateURL https://github.com/Bobnarva/moodle-commando/raw/refs/heads/main/commando.user.js
+// @downloadURL https://github.com/Bobnarva/moodle-commando/raw/refs/heads/main/commando.user.js
 // ==/UserScript==
 
 (function() {
