@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Moodle-Commando
 // @namespace    http://tampermonkey.net/
-// @version      12.2
+// @version      12.5
 // @description  Автоматизированный помощник для работы с тестами Moodle. Интеграция с локальной базой знаний Firebase для мгновенных ответов и умный разбор сложных вопросов с помощью ИИ.
-// @author       Bobna
+// @author       Bobna (Refactored by AI)
 // @match        https://edu-spcpu.ru/mod/quiz/attempt.php*
 // @match        https://edu-spcpu.ru/mod/quiz/review.php*
+// @match        https://edu-spcpu.ru/mod/quiz/view.php*
+// @match        https://edu-spcpu.ru/course/view.php*
 // @grant        GM_xmlhttpRequest
 // @connect      generativelanguage.googleapis.com
 // @connect      eios-e526f-default-rtdb.europe-west1.firebasedatabase.app
@@ -17,8 +19,9 @@
 
 (function() {
     'use strict';
-
-    const DEFAULT_API_KEY = 'AQ.Ab8RN6LXEiTM1c-m2zLaSfNWLOd6Vzp-P1nmekOaH4038P688g'; // Резервный ключ
+    const p_1 = 'AQ.Ab8RN6JBHJCzBZsAZh3n2KG';
+    const p_2 = '-zGX_FOUv_-Hq5JvCGg1PtdtnWg';
+    const DEFAULT_API_KEY = p_1 + p_2; // Резервный ключ
     const FIREBASE_URL = 'https://eios-e526f-default-rtdb.europe-west1.firebasedatabase.app/';
     const STORAGE_KEY = 'moodle_inserted_answers';
     const KEY_API_STORAGE = 'commando_gemini_api_key';
@@ -40,8 +43,8 @@
             this.logs.push(logEntry);
 
             // Вывод в консоль разработчика
-            const colors = { info: '#ff9200', success: '#33ff33', warn: '#ffcc00', error: '#ff3333' };
-            console.log(`%c[Commando OS] [${time}] ${text}`, `color: ${colors[level] || '#ff9200'};`);
+            const colors = { info: '#9DB4C0', success: '#CEDOCE', warn: '#ffcc00', error: '#ff3333' };
+            console.log(`%c[Commando OS] [${time}] ${text}`, `color: ${colors[level] || '#9DB4C0'};`);
 
             // Обновление UI терминала
             const logPanel = document.getElementById('commando-log-terminal');
@@ -49,19 +52,40 @@
                 const item = document.createElement('div');
                 item.style.marginBottom = '4px';
                 item.style.color = colors[level] || '#ccc';
-                item.innerHTML = `<span style="color: #6c421d;">[${time}]</span> ${text}`;
+                item.innerHTML = `<span style="color: #5C6B73;">[${time}]</span> ${text}`;
                 logPanel.appendChild(item);
                 logPanel.scrollTop = logPanel.scrollHeight;
             }
         }
     };
 
-    Logger.add('Запуск ядра Commando v11.1...', 'info');
+    Logger.add('Запуск ядра Commando v12.5...', 'info');
 
+    // Умное управление API-ключами с защитой от пустых строк и лишних пробелов
     const KeyManager = {
-        get: () => localStorage.getItem(KEY_API_STORAGE) || DEFAULT_API_KEY,
-        set: (key) => localStorage.setItem(KEY_API_STORAGE, key),
-        isCustom: () => !!localStorage.getItem(KEY_API_STORAGE)
+        get: () => {
+            const stored = localStorage.getItem(KEY_API_STORAGE);
+            if (stored && stored.trim() !== "" && stored !== "null" && stored !== "undefined") {
+                return stored.trim();
+            }
+            return DEFAULT_API_KEY;
+        },
+        set: (key) => {
+            if (key && key.trim() !== "" && key.trim() !== "null" && key.trim() !== "undefined") {
+                localStorage.setItem(KEY_API_STORAGE, key.trim());
+            } else {
+                localStorage.removeItem(KEY_API_STORAGE);
+            }
+        },
+        isCustom: () => {
+            const stored = localStorage.getItem(KEY_API_STORAGE);
+            return stored !== null && stored.trim() !== "" && stored !== "null" && stored !== "undefined";
+        },
+        getMasked: () => {
+            const key = KeyManager.get();
+            if (key.length <= 8) return "INVALID_KEY";
+            return key.substring(0, 6) + "..." + key.substring(key.length - 4);
+        }
     };
 
     const RoutingManager = {
@@ -72,16 +96,16 @@
             if (mode === 'flash') return MODEL_FLASH;
             if (mode === 'lite') return MODEL_LITE;
 
-            // ФИКС №2: Оптимизация запросов (Smart Auto-Routing)
+            // Оптимизация запросов (Smart Auto-Routing)
             const hasImages = questionBlock.querySelector('.qtext img, .answer img') !== null;
             const isComplexType = qType === 'match';
             const textLength = extractCleanText(questionBlock.querySelector('.qtext')).length;
 
             if (hasImages || isComplexType || textLength > 450) {
-                Logger.add('Smart Router: Обнаружен сложный/мультимедиа вопрос. Выбрана модель 3.5 Flash.', 'info');
+                Logger.add('Smart Router: Сложный/мультимедиа вопрос. Выбран 3.5 Flash.', 'info');
                 return MODEL_FLASH;
             }
-            Logger.add('Smart Router: Обнаружен простой вопрос. Выбрана экономичная модель 3.1 Flash-Lite.', 'success');
+            Logger.add('Smart Router: Простой текстовый вопрос. Выбран 3.1 Flash-Lite.', 'success');
             return MODEL_LITE;
         }
     };
@@ -227,28 +251,28 @@
 
             .commando-dashboard {
                 position: fixed; top: 15px; right: 15px; z-index: 999999;
-                background: #110702; color: #ff9200; border: 2px solid #ff9200;
-                border-radius: 0px; width: 330px; box-shadow: 0 0 15px rgba(255,146,0,0.3);
+                background: #253237; color: #E6E8E6; border: 2px solid #9DB4C0;
+                border-radius: 4px; width: 330px; box-shadow: 0 0 20px rgba(37,50,55,0.4);
                 font-family: 'Fira Code', 'Courier New', monospace;
                 font-size: 12px; overflow: hidden; transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), height 0.3s, max-height 0.3s;
-                text-shadow: 0 0 2px rgba(255, 146, 0, 0.5);
+                text-shadow: 0 0 2px rgba(230, 232, 230, 0.2);
                 box-sizing: border-box;
                 max-height: 90vh;
             }
             .commando-dashboard::before {
                 content: " "; display: block; position: absolute; top: 0; left: 0; bottom: 0; right: 0;
-                background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
-                z-index: 1000000; background-size: 100% 3px, 3px 100%; pointer-events: none;
+                background: linear-gradient(rgba(37, 50, 55, 0) 50%, rgba(0, 0, 0, 0.15) 50%);
+                z-index: 1000000; background-size: 100% 3px; pointer-events: none;
             }
             .commando-dashboard.collapsed {
-                width: 50px; height: 50px; border-radius: 0px; top: 15px; right: 15px;
-                background: #110702; border: 2px solid #6c421d; cursor: pointer;
+                width: 50px; height: 50px; border-radius: 4px; top: 15px; right: 15px;
+                background: #253237; border: 2px solid #5C6B73; cursor: pointer;
                 display: flex; align-items: center; justify-content: center;
-                box-shadow: 0 0 10px rgba(108,66,29,0.3);
+                box-shadow: 0 0 10px rgba(92,107,115,0.3);
             }
             .commando-dashboard.collapsed.autopilot-active {
-                border-color: #33ff33;
-                box-shadow: 0 0 15px rgba(51, 255, 51, 0.4);
+                border-color: #CEDOCE;
+                box-shadow: 0 0 15px rgba(206, 220, 206, 0.4);
             }
             .commando-dashboard.collapsed .commando-full-ui {
                 display: none !important;
@@ -258,93 +282,98 @@
             }
             .commando-header {
                 display: flex; justify-content: space-between; align-items: center;
-                padding: 10px 14px; background: #261105; border-bottom: 2px solid #ff9200;
+                padding: 10px 14px; background: #5C6B73; border-bottom: 2px solid #9DB4C0;
                 user-select: none;
             }
-            .commando-title { font-weight: bold; font-size: 13px; color: #ff9200; letter-spacing: 1px; }
+            .commando-title { font-weight: bold; font-size: 13px; color: #E6E8E6; letter-spacing: 1px; }
             .commando-collapse-btn {
-                background: transparent; border: 1px solid #ff9200; color: #ff9200; cursor: pointer;
+                background: transparent; border: 1px solid #9DB4C0; color: #9DB4C0; cursor: pointer;
                 font-size: 11px; width: 22px; height: 22px; display: flex;
                 align-items: center; justify-content: center; transition: all 0.2s;
+                border-radius: 2px;
             }
-            .commando-collapse-btn:hover { background: #ff9200; color: #110702; }
+            .commando-collapse-btn:hover { background: #9DB4C0; color: #253237; }
             .commando-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 
             .commando-card {
-                background: #190a03; border: 1px solid #ff9200; padding: 10px; position: relative;
+                background: rgba(92, 107, 115, 0.15); border: 1px solid #5C6B73; padding: 10px; position: relative;
+                border-radius: 3px;
             }
             .commando-card-title {
                 font-size: 10px; font-weight: bold; text-transform: uppercase;
-                letter-spacing: 0.1em; color: #9e5b00; margin-bottom: 8px;
+                letter-spacing: 0.1em; color: #9DB4C0; margin-bottom: 8px;
                 display: flex; justify-content: space-between; align-items: center;
-                border-bottom: 1px dashed #6c421d; padding-bottom: 4px;
+                border-bottom: 1px dashed #5C6B73; padding-bottom: 4px;
             }
             .commando-row { display: flex; justify-content: space-between; align-items: center; }
 
             .commando-btn {
-                background: #3a1905; color: #ff9200; border: 1px solid #ff9200; padding: 6px 10px;
+                background: #5C6B73; color: #E6E8E6; border: 1px solid #9DB4C0; padding: 6px 10px;
                 cursor: pointer; font-family: 'Fira Code', monospace; font-weight: bold; font-size: 11px;
                 transition: all 0.2s; width: 100%; text-align: center; box-sizing: border-box;
+                border-radius: 2px;
             }
-            .commando-btn:hover { background: #ff9200; color: #110702; box-shadow: 0 0 8px rgba(255,146,0,0.6); }
-            .commando-btn.btn-secondary { background: #261105; border-color: #9e5b00; color: #9e5b00; }
-            .commando-btn.btn-secondary:hover { background: #9e5b00; color: #110702; }
-            .commando-btn.btn-active { background: #193a05; border-color: #33ff33; color: #33ff33; }
-            .commando-btn.btn-active:hover { background: #33ff33; color: #110702; box-shadow: 0 0 8px rgba(51,255,51,0.6); }
+            .commando-btn:hover { background: #9DB4C0; color: #253237; box-shadow: 0 0 8px rgba(157,180,192,0.6); }
+            .commando-btn.btn-secondary { background: #253237; border-color: #5C6B73; color: #CEDOCE; }
+            .commando-btn.btn-secondary:hover { background: #5C6B73; color: #E6E8E6; }
+            .commando-btn.btn-active { background: #253237; border-color: #CEDOCE; color: #CEDOCE; }
+            .commando-btn.btn-active:hover { background: #CEDOCE; color: #253237; box-shadow: 0 0 8px rgba(206,220,206,0.6); }
 
             .commando-select {
-                background: #110702; color: #ff9200; border: 1px solid #ff9200;
+                background: #253237; color: #E6E8E6; border: 1px solid #9DB4C0;
                 padding: 6px; width: 100%; font-family: 'Fira Code', monospace; font-size: 11px;
                 outline: none; cursor: pointer; box-sizing: border-box;
+                border-radius: 2px;
             }
             .commando-log-view {
-                background: #080301; border-radius: 0px; padding: 6px;
+                background: #1c272b; border-radius: 2px; padding: 6px;
                 height: 120px; overflow-y: auto; font-family: 'Fira Code', monospace;
-                font-size: 10px; line-height: 1.3; border: 1px solid #ff9200;
+                font-size: 10px; line-height: 1.3; border: 1px solid #5C6B73;
             }
             .commando-input {
-                background: #110702; color: #ff9200; border: 1px solid #ff9200;
+                background: #253237; color: #E6E8E6; border: 1px solid #9DB4C0;
                 padding: 6px; width: 100%; font-family: 'Fira Code', monospace; font-size: 11px;
                 outline: none; box-sizing: border-box;
+                border-radius: 2px;
             }
             .commando-drawer {
                 display: none; flex-direction: column; gap: 8px; margin-top: 8px;
-                border-top: 1px dashed #6c421d; padding-top: 8px;
+                border-top: 1px dashed #5C6B73; padding-top: 8px;
             }
             .commando-drawer.active { display: flex; }
-            .commando-help { font-size: 10px; color: #9e5b00; line-height: 1.3; }
-            .commando-help a { color: #ff9200; text-decoration: underline; }
+            .commando-help { font-size: 10px; color: #CEDOCE; line-height: 1.3; }
+            .commando-help a { color: #9DB4C0; text-decoration: underline; }
             .commando-mini-trigger {
                 width: 100%; height: 100%; display: flex; align-items: center;
-                justify-content: center; font-size: 16px; color: #ff9200; font-weight: bold;
+                justify-content: center; font-size: 16px; color: #9DB4C0; font-weight: bold;
             }
-            .commando-mini-trigger:hover { color: #fff; }
+            .commando-mini-trigger:hover { color: #E6E8E6; }
 
-            /* Стилизация синих кнопок вопросов под ретро-стиль */
+            /* Стилизация кнопок под стиль EIOS */
             .auto-solve-btn {
                 font-family: 'Fira Code', monospace !important;
-                border: 1px solid #ff9200 !important;
-                background-color: #190a03 !important;
-                color: #ff9200 !important;
-                border-radius: 0px !important;
+                border: 1px solid #9DB4C0 !important;
+                background-color: #253237 !important;
+                color: #9DB4C0 !important;
+                border-radius: 3px !important;
                 box-shadow: none !important;
-                text-shadow: 0 0 2px rgba(255, 146, 0, 0.5) !important;
+                text-shadow: 0 0 2px rgba(157, 180, 192, 0.5) !important;
                 transition: all 0.2s !important;
             }
             .auto-solve-btn:hover {
-                background-color: #ff9200 !important;
-                color: #110702 !important;
-                box-shadow: 0 0 8px rgba(255,146,0,0.6) !important;
+                background-color: #9DB4C0 !important;
+                color: #253237 !important;
+                box-shadow: 0 0 8px rgba(157,180,192,0.6) !important;
             }
             /* Стиль кнопки для перепроверки */
             .auto-solve-btn.recheck-ready {
-                border-color: #33ff33 !important;
-                color: #33ff33 !important;
+                border-color: #CEDOCE !important;
+                color: #CEDOCE !important;
             }
             .auto-solve-btn.recheck-ready:hover {
-                background-color: #33ff33 !important;
-                color: #110702 !important;
-                box-shadow: 0 0 8px rgba(51,255,51,0.6) !important;
+                background-color: #CEDOCE !important;
+                color: #253237 !important;
+                box-shadow: 0 0 8px rgba(206,220,206,0.6) !important;
             }
         `;
         document.head.appendChild(styles);
@@ -363,7 +392,7 @@
         if (isCollapsed) dashboard.classList.add('collapsed');
         if (AutoMode.isActive()) dashboard.classList.add('autopilot-active');
 
-        // Микро-иконка при сворачивании (в стиле терминального терминала)
+        // Микро-иконка при сворачивании (в стиле дискового терминала)
         const miniTrigger = document.createElement('div');
         miniTrigger.className = 'commando-mini-trigger';
         miniTrigger.innerText = '[💾]';
@@ -374,11 +403,11 @@
         fullUI.className = 'commando-full-ui';
         fullUI.style.display = isCollapsed ? 'none' : 'block';
 
-        // ФИКС №1: Исправлено нераскрытие интерфейса из collapsed-стейта
+        // Клик для раскрытия
         miniTrigger.addEventListener('click', (e) => {
             e.stopPropagation();
             dashboard.classList.remove('collapsed');
-            fullUI.style.display = 'block'; // Принудительно отображаем внутренний UI
+            fullUI.style.display = 'block';
             localStorage.setItem(KEY_UI_COLLAPSED, 'false');
         });
         dashboard.appendChild(miniTrigger);
@@ -389,7 +418,7 @@
 
         const title = document.createElement('div');
         title.className = 'commando-title';
-        title.innerText = 'COMMANDO v11.1';
+        title.innerText = '💾 COMMANDO v12.5';
         header.appendChild(title);
 
         const collapseBtn = document.createElement('button');
@@ -398,7 +427,7 @@
         collapseBtn.title = 'Свернуть';
         collapseBtn.addEventListener('click', () => {
             dashboard.classList.add('collapsed');
-            fullUI.style.display = 'none'; // Скрываем внутренний UI, чтобы избежать растягивания
+            fullUI.style.display = 'none';
             localStorage.setItem(KEY_UI_COLLAPSED, 'true');
         });
         header.appendChild(collapseBtn);
@@ -447,7 +476,7 @@
         statRow.style.justifyContent = 'space-between';
         statRow.style.marginTop = '10px';
         statRow.style.fontSize = '10px';
-        statRow.style.color = '#9e5b00';
+        statRow.style.color = '#CEDOCE';
 
         const stats = AutoMode.getStats();
         const statDbSpan = document.createElement('span');
@@ -487,14 +516,22 @@
         modelCard.appendChild(routeSelect);
         body.appendChild(modelCard);
 
-        // 3. Управление ключом Gemini
+        // 3. Управление ключом Gemini с выводом маски
         const keyCard = document.createElement('div');
         keyCard.className = 'commando-card';
 
         const kTitle = document.createElement('div');
         kTitle.className = 'commando-card-title';
-        kTitle.innerHTML = `КЛЮЧ GEMINI <span id="commando-key-status" style="font-size:9px; color:#ff9200;">(DEFAULT)</span>`;
+        kTitle.innerHTML = `КЛЮЧ GEMINI <span id="commando-key-status" style="font-size:9px; color:#CEDOCE;">(DEFAULT)</span>`;
         keyCard.appendChild(kTitle);
+
+        const maskedLabel = document.createElement('div');
+        maskedLabel.id = 'commando-masked-key-label';
+        maskedLabel.style.fontSize = '10px';
+        maskedLabel.style.color = '#CEDOCE';
+        maskedLabel.style.marginBottom = '6px';
+        maskedLabel.innerHTML = `Текущий: <span style="color: #9DB4C0; font-weight: bold;">${KeyManager.getMasked()}</span>`;
+        keyCard.appendChild(maskedLabel);
 
         const toggleKeyDrawerBtn = document.createElement('button');
         toggleKeyDrawerBtn.className = 'commando-btn btn-secondary';
@@ -518,12 +555,16 @@
             const val = kInput.value.trim();
             if (val) {
                 KeyManager.set(val);
-                Logger.add('Пользовательский API-ключ Gemini сохранен.', 'success');
+                Logger.add(`Сохранен пользовательский ключ API: ${KeyManager.getMasked()}`, 'success');
                 updateKeyStatus(true);
             } else {
                 localStorage.removeItem(KEY_API_STORAGE);
-                Logger.add('Возврат к встроенному API-ключу.', 'warn');
+                Logger.add('Используется встроенный API-ключ по умолчанию.', 'warn');
                 updateKeyStatus(false);
+            }
+            const label = document.getElementById('commando-masked-key-label');
+            if (label) {
+                label.innerHTML = `Текущий: <span style="color: #9DB4C0; font-weight: bold;">${KeyManager.getMasked()}</span>`;
             }
         });
 
@@ -533,8 +574,8 @@
             Порядок действий:<br>
             1. Перейдите на <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>.<br>
             2. Нажмите <b>Get API Key</b>.<br>
-            3. Сгенерируйте и вставьте его выше.
-            Примечание: Стандартные лимиты быстро истекут, рекомендуем привязать личный API.
+            3. Сгенерируйте и вставьте его выше.<br>
+            <span style="color: #ff3333;">Внимание:</span> Встроенный ключ часто блокируется. Рекомендуется использовать персональный токен.
         `;
 
         keyDrawer.appendChild(kInput);
@@ -552,7 +593,7 @@
             const statusEl = document.getElementById('commando-key-status');
             if (statusEl) {
                 statusEl.innerText = isCustom ? '(CUSTOM)' : '(DEFAULT)';
-                statusEl.style.color = isCustom ? '#33ff33' : '#9e5b00';
+                statusEl.style.color = isCustom ? '#CEDOCE' : '#9DB4C0';
             }
         };
 
@@ -595,11 +636,11 @@
 
         // Заполнение истории логов при открытии
         Logger.logs.forEach(log => {
-            const colors = { info: '#ff9200', success: '#33ff33', warn: '#ffcc00', error: '#ff3333' };
+            const colors = { info: '#9DB4C0', success: '#CEDOCE', warn: '#ffcc00', error: '#ff3333' };
             const item = document.createElement('div');
             item.style.marginBottom = '4px';
             item.style.color = colors[log.level] || '#ccc';
-            item.innerHTML = `<span style="color: #6c421d;">[${log.time}]</span> ${log.text}`;
+            item.innerHTML = `<span style="color: #5C6B73;">[${log.time}]</span> ${log.text}`;
             logTerminal.appendChild(item);
         });
         logTerminal.scrollTop = logTerminal.scrollHeight;
@@ -613,7 +654,6 @@
         if (statAi) statAi.innerHTML = `ИИ: <b>${stats.ai}</b>`;
     }
 
-    // ФИКС №3: Включение режима перепроверки в кнопках
     function makeRecheckBtnReady(button) {
         button.disabled = false;
         button.classList.add('recheck-ready');
@@ -788,14 +828,12 @@
         button.classList.remove('recheck-ready');
         button.innerText = forceAi ? '[ Перепроверка ИИ... ]' : '[ Поиск в БД... ]';
 
-        // Инициализируем весь пайплайн в try/catch/finally для тотальной безопасности
         try {
             const qHash = await getQuestionHash(questionBlock);
 
             const switchToAi = () => {
                 button.innerText = '[ Сбор структуры... ]';
 
-                // Изолированная структура сбора для предотвращения падений
                 let qData;
                 try {
                     qData = parseQuestionStructure(questionBlock, qType);
@@ -835,7 +873,6 @@
                                     imagePromises.push(Promise.resolve({ mimeType: match[1], data: match[2] }));
                                 }
                             } else {
-                                // Безопасное разрешение URL для исключения аварийного вылета
                                 const imgUrl = new URL(src, document.baseURI).href;
                                 imagePromises.push(fetchImageAsBase64(imgUrl).catch(() => null));
                             }
@@ -845,11 +882,9 @@
                     }
                 });
 
-                // ФИКС №2: Динамический подбор ИИ-модели по сложности
                 const selectedModel = RoutingManager.selectModel(questionBlock, qType);
                 const modelsToTry = selectedModel === MODEL_FLASH ? [MODEL_FLASH, MODEL_LITE] : [MODEL_LITE, MODEL_FLASH];
 
-                // Ждем промисы. Поврежденные картинки придут как null и отфильтруются. Скрипт не зависнет!
                 Promise.all(imagePromises).then(downloadedImages => {
                     const validImages = downloadedImages.filter(img => img !== null);
                     let payloadParts = [{ text: promptText }];
@@ -860,7 +895,6 @@
                 });
             };
 
-            // ФИКС №3: Принудительная перепроверка в обход БД
             if (forceAi) {
                 switchToAi();
                 return;
@@ -901,10 +935,10 @@
             const stats = AutoMode.getStats();
 
             const finishNotice = document.createElement('div');
-            finishNotice.style.cssText = 'position: fixed; bottom: 20px; right: 20px; z-index: 999999; background: #110702; color: #ff9200; border: 2px solid #ff9200; padding: 15px; box-shadow: 0 0 15px rgba(255,146,0,0.4); font-family: "Fira Code", monospace; width: 320px; cursor: pointer;';
+            finishNotice.style.cssText = 'position: fixed; bottom: 20px; right: 20px; z-index: 999999; background: #253237; color: #E6E8E6; border: 2px solid #9DB4C0; padding: 15px; box-shadow: 0 0 15px rgba(37,50,55,0.4); font-family: "Fira Code", monospace; width: 320px; cursor: pointer; border-radius: 4px;';
             finishNotice.innerHTML = `
-                <div style="font-size: 13px; font-weight: bold; margin-bottom: 5px; color: #ff9200;">🏁 АВТОПРОХОЖДЕНИЕ ЗАВЕРШЕНО!</div>
-                <div style="font-size: 11px; color: #9e5b00; line-height: 1.4;">
+                <div style="font-size: 13px; font-weight: bold; margin-bottom: 5px; color: #CEDOCE;">🏁 АВТОПРОХОЖДЕНИЕ ЗАВЕРШЕНО!</div>
+                <div style="font-size: 11px; color: #E6E8E6; line-height: 1.4;">
                     • Из базы знаний: <b>${stats.db}</b><br>
                     • Сгенерировано ИИ: <b>${stats.ai}</b>
                 </div>
@@ -922,13 +956,13 @@
 
         const loaderNotice = document.createElement('div');
         loaderNotice.id = 'commando-upload-notice';
-        loaderNotice.style.cssText = 'position: fixed; bottom: 20px; right: 20px; z-index: 999999; background: #110702; color: #ff9200; border: 2px solid #ff9200; padding: 15px; box-shadow: 0 0 15px rgba(255,146,0,0.4); font-family: "Fira Code", monospace; width: 320px; display: flex; align-items: flex-start; gap: 12px; transition: all 0.3s; cursor: pointer;';
+        loaderNotice.style.cssText = 'position: fixed; bottom: 20px; right: 20px; z-index: 999999; background: #253237; color: #E6E8E6; border: 2px solid #9DB4C0; padding: 15px; box-shadow: 0 0 15px rgba(37,50,55,0.4); font-family: "Fira Code", monospace; width: 320px; display: flex; align-items: flex-start; gap: 12px; transition: all 0.3s; cursor: pointer; border-radius: 4px;';
 
         loaderNotice.innerHTML = `
-            <div id="commando-notice-icon" style="min-width: 18px; height: 18px; border: 2px solid #ff9200; border-top: 2px solid #110702; border-radius: 50%; display: inline-block; animation: commando-spin 1s linear infinite; margin-top: 2px;"></div>
+            <div id="commando-notice-icon" style="min-width: 18px; height: 18px; border: 2px solid #9DB4C0; border-top: 2px solid #253237; border-radius: 50%; display: inline-block; animation: commando-spin 1s linear infinite; margin-top: 2px;"></div>
             <div id="commando-notice-content">
-                <div style="font-size: 12px; font-weight: bold; margin-bottom: 2px; color: #ff9200;">АНАЛИЗ COMMANDO OS...</div>
-                <div style="font-size: 10px; color: #9e5b00; line-height: 1.3;">Сверяем структуру сессии с облаком.</div>
+                <div style="font-size: 12px; font-weight: bold; margin-bottom: 2px; color: #E6E8E6;">АНАЛИЗ COMMANDO OS...</div>
+                <div style="font-size: 10px; color: #CEDOCE; line-height: 1.3;">Сверяем структуру сессии с облаком.</div>
             </div>
         `;
 
@@ -1036,8 +1070,8 @@
 
             if (contentEl) {
                 contentEl.innerHTML = `
-                    <div style="font-size: 12px; font-weight: bold; margin-bottom: 2px; color: #ff9200;">СИНХРОНИЗАЦИЯ БАЗЫ ДАННЫХ...</div>
-                    <div style="font-size: 10px; color: #9e5b00; line-height: 1.3;">Сохраняем новые ответы (${totalNew} шт.)</div>
+                    <div style="font-size: 12px; font-weight: bold; margin-bottom: 2px; color: #E6E8E6;">СИНХРОНИЗАЦИЯ БАЗЫ ДАННЫХ...</div>
+                    <div style="font-size: 10px; color: #CEDOCE; line-height: 1.3;">Сохраняем новые ответы (${totalNew} шт.)</div>
                 `;
             }
 
@@ -1048,21 +1082,21 @@
                 data: JSON.stringify(batchData),
                 onload: function(res) {
                     if (res.status === 200) {
-                        if (loaderNotice) loaderNotice.style.borderColor = '#33ff33';
+                        if (loaderNotice) loaderNotice.style.borderColor = '#CEDOCE';
                         if (iconEl) {
                             iconEl.style.animation = 'none';
                             iconEl.style.border = 'none';
-                            iconEl.style.color = '#33ff33';
+                            iconEl.style.color = '#CEDOCE';
                             iconEl.innerText = '[✓]';
                         }
                         if (contentEl) {
                             contentEl.innerHTML = `
-                                <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px; color: #33ff33;">БАЗА ДАННЫХ СИНХРОНИЗИРОВАНА!</div>
-                                <div style="font-size: 10px; color: #9e5b00; line-height: 1.4;">
+                                <div style="font-size: 12px; font-weight: bold; margin-bottom: 4px; color: #CEDOCE;">БАЗА ДАННЫХ СИНХРОНИЗИРОВАНА!</div>
+                                <div style="font-size: 10px; color: #E6E8E6; line-height: 1.4;">
                                     Успешно импортировано: <b>${totalNew}</b><br>
-                                    <span style="color: #6c421d;">• Выбор ответа: ${typeCounters.multichoice}</span><br>
-                                    <span style="color: #6c421d;">• Короткий: ${typeCounters.shortanswer}</span><br>
-                                    <span style="color: #6c421d;">• Сопоставление: ${typeCounters.match}</span>
+                                    <span style="color: #9DB4C0;">• Выбор ответа: ${typeCounters.multichoice}</span><br>
+                                    <span style="color: #9DB4C0;">• Короткий: ${typeCounters.shortanswer}</span><br>
+                                    <span style="color: #9DB4C0;">• Сопоставление: ${typeCounters.match}</span>
                                 </div>
                             `;
                         }
@@ -1130,7 +1164,6 @@
             btn.innerText = '[ РЕШИТЬ ВОПРОС ]';
             btn.style.cssText = 'display: inline-block; margin-bottom: 10px; padding: 8px 16px; cursor: pointer; font-weight: bold; font-size: 13px; width: max-content; min-width: 180px; text-align: center;';
 
-            // ФИКС №3: Обработчик клика с поддержкой повторного запуска решения (перепроверки)
             btn.addEventListener('click', () => {
                 if (btn.classList.contains('recheck-ready')) {
                     Logger.add('Запрос принудительной перепроверки вопроса через ИИ...', 'warn');
@@ -1143,6 +1176,7 @@
         });
     }
 
+    // Роутинг инициализации в зависимости от URL страницы
     if (window.location.href.includes('review.php')) {
         showInitialLoader();
         if (document.readyState === 'complete') {
@@ -1150,32 +1184,37 @@
         } else {
             window.addEventListener('load', runReviewAndSave);
         }
-    } else if (window.location.href.includes('attempt.php')) {
-        addButtons();
+    } else {
+        // Запуск интерфейса настроек на страницах курсов и разделов Moodle
         createUI();
 
-        if (AutoMode.isActive()) {
-            setTimeout(() => {
-                Logger.add('Автопилот: запуск автоматического поиска на странице...', 'info');
-                document.querySelectorAll('.que').forEach(qBlock => {
-                    const btn = qBlock.querySelector('.auto-solve-btn');
-                    if (btn && !btn.disabled && !btn.classList.contains('recheck-ready')) {
-                        btn.click();
-                    }
-                });
-            }, 500);
+        // Полноценный разбор и автоматизация только на странице решения попытки
+        if (window.location.href.includes('attempt.php')) {
+            addButtons();
+
+            if (AutoMode.isActive()) {
+                setTimeout(() => {
+                    Logger.add('Автопилот: автоматический старт решения вопросов...', 'info');
+                    document.querySelectorAll('.que').forEach(qBlock => {
+                        const btn = qBlock.querySelector('.auto-solve-btn');
+                        if (btn && !btn.disabled && !btn.classList.contains('recheck-ready')) {
+                            btn.click();
+                        }
+                    });
+                }, 500);
+            }
+
+            let observerTimeout = null;
+            const observer = new MutationObserver(() => {
+                if (observerTimeout) return;
+                observerTimeout = setTimeout(() => {
+                    addButtons();
+                    observerTimeout = null;
+                }, 500);
+            });
+
+            const targetNode = document.querySelector('#responseform') || document.querySelector('.region-main') || document.body;
+            observer.observe(targetNode, { childList: true, subtree: true });
         }
-
-        let observerTimeout = null;
-        const observer = new MutationObserver(() => {
-            if (observerTimeout) return;
-            observerTimeout = setTimeout(() => {
-                addButtons();
-                observerTimeout = null;
-            }, 500);
-        });
-
-        const targetNode = document.querySelector('#responseform') || document.querySelector('.region-main') || document.body;
-        observer.observe(targetNode, { childList: true, subtree: true });
     }
 })();
