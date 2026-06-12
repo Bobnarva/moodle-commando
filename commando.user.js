@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Moodle Universal Commando (v10.7)
+// @name         Moodle-Commando
 // @namespace    http://tampermonkey.net/
 // @version      10.7
 // @description  Автоматизированный помощник для работы с тестами Moodle. Интеграция с локальной базой знаний Firebase для мгновенных ответов и умный разбор сложных вопросов с помощью моделей ИИ Gemini.
