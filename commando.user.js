@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Moodle-Commando
 // @namespace    http://tampermonkey.net/
-// @version      10.8
+// @version      10.9
 // @description  Автоматизированный помощник для работы с тестами Moodle. Интеграция с локальной базой знаний Firebase для мгновенных ответов и умный разбор сложных вопросов с помощью моделей ИИ Gemini.
 // @author       Bobna
 // @match        https://edu-spcpu.ru/mod/quiz/attempt.php*
@@ -33,7 +33,7 @@
 
     let activeRequestsOnPage = 0;
 
-    console.log('%c[Moodle Commando v10.8] Ранний старт интерфейса активирован.', 'color: #007bff; font-weight: bold;');
+    console.log('%c[Moodle Commando v10.9] Ранний старт интерфейса активирован.', 'color: #007bff; font-weight: bold;');
 
     // --- СЕРВИСНЫЕ ФУНКЦИИ АВТОХОДА И СТАТИСТИКИ ---
     const AutoMode = {
@@ -159,9 +159,6 @@
         }
     }
 
-    // =========================================================================
-    // МГНОВЕННЫЙ ВЫВОД ПЛАШКИ (ДО РАБОТЫ ОСНОВНЫХ СКРИПТОВ)
-    // =========================================================================
     function showInitialLoader() {
         if (document.getElementById('commando-upload-notice')) return;
 
@@ -190,7 +187,7 @@
     }
 
     // =========================================================================
-    // ЭТАП 1: СБОР СТАТИСТИКИ (REVIEW.PHP)
+    // ЭТАП 1: СБОР СТАТИСТИКИ (REVIEW.PHP) — С ПРАВКАМИ ПАРСИНГА ТИПОВ ДАННЫХ
     // =========================================================================
     function runReviewAndSave() {
         console.log('[REVIEW] Анализ контента страницы...');
@@ -205,7 +202,6 @@
         const iconEl = document.getElementById('commando-notice-icon');
         const contentEl = document.getElementById('commando-notice-content');
 
-        // 1. Очистка базы от реальных ошибок
         document.querySelectorAll('.que.incorrect').forEach(qBlock => {
             const qHash = getQuestionHash(qBlock);
             if (trackedAnswers[qHash]) {
@@ -215,7 +211,6 @@
 
         let batchData = {};
 
-        // 2. Сбор идеальных блоков
         document.querySelectorAll('.que.correct').forEach(qBlock => {
             let qType = 'unknown';
             if (qBlock.classList.contains('multichoice')) qType = 'multichoice';
@@ -229,7 +224,15 @@
 
             if (qType === 'shortanswer') {
                 const rightAnswerEl = qBlock.querySelector('.outcome .rightanswer');
-                if (rightAnswerEl) answers = rightAnswerEl.innerText.replace(/Правильный\s+ответ:\s*/i, '').trim();
+                if (rightAnswerEl) {
+                    answers = rightAnswerEl.innerText.replace(/Правильный\s+ответ:\s*/i, '').trim();
+                } else {
+                    // ПРАВКА №1: Если блока .rightanswer нет, берем значение прямо из заполненного инпута
+                    const inputEl = qBlock.querySelector('input[type="text"].form-control');
+                    if (inputEl && inputEl.value.trim() !== '') {
+                        answers = inputEl.value.trim();
+                    }
+                }
             }
             else if (qType === 'match') {
                 let mappings = {};
@@ -247,11 +250,15 @@
             }
             else if (qType === 'multichoice' || qType === 'truefalse') {
                 let checkedTexts = [];
-                qBlock.querySelectorAll('.answer input').forEach(input => {
-                    if (input.checked || input.getAttribute('checked') === 'checked') {
-                        let row = input.closest('.r0, .r1');
-                        let textEl = row ? (row.querySelector('.flex-fill') || row.querySelector('label')) : null;
-                        if (textEl && (row.querySelector('.fa-check, .text-success') || qBlock.classList.contains('correct'))) {
+                qBlock.querySelectorAll('.answer .r0, .answer .r1').forEach(row => {
+                    const input = row.querySelector('input');
+                    // ПРАВКА №2: Проверяем не только .checked, но и классы разметки правильного ответа Moodle
+                    const isMoodleCorrect = row.classList.contains('correct') || row.querySelector('.fa-check, .text-success');
+                    const isPhysicallyChecked = input && (input.checked || input.getAttribute('checked') === 'checked');
+                    
+                    if (isPhysicallyChecked || isMoodleCorrect) {
+                        let textEl = row.querySelector('.flex-fill') || row.querySelector('label');
+                        if (textEl && (isMoodleCorrect || qBlock.classList.contains('correct'))) {
                             checkedTexts.push(extractCleanText(textEl));
                         }
                     }
@@ -499,7 +506,6 @@
         button.disabled = true;
         button.innerText = '🔍 Поиск в БД...';
 
-        // Изолированная функция-фолбек для ухода на ИИ при любых ошибках базы данных
         const switchToAi = () => {
             button.innerText = '📷 Сбор структуры...';
             const qData = parseQuestionStructure(questionBlock, qType);
@@ -563,7 +569,6 @@
             btn.type = 'button';
             btn.className = 'auto-solve-btn';
             btn.innerText = 'Решить вопрос';
-            // Изменен цвет фона с #bae1f7 на #007bff для нормальной контрастности текста
             btn.style.cssText = 'display: inline-block; margin-bottom: 10px; padding: 8px 16px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; width: max-content; min-width: 180px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1);';
 
             btn.addEventListener('click', () => processQuestion(q, btn));
@@ -585,70 +590,32 @@
         panel.appendChild(title);
 
         const disclaimer = document.createElement('div');
-        disclaimer.innerHTML = '⚠ <b>Инфо:</b> Ответы, сгенерированные через ИИ, могут содержать ошибки в точных науках!';
-        disclaimer.style.cssText = 'font-size: 11px; color: #856404; background-color: #fff3cd; border: 1px solid #ffeeba; border-radius: 4px; padding: 6px; line-height: 1.3;';
+        disclaimer.innerText = 'Автоматический запуск прохождения тестов.';
+        disclaimer.style.cssText = 'font-size: 11px; color: #666;';
         panel.appendChild(disclaimer);
 
-        const actionBtn = document.createElement('button');
-        actionBtn.id = 'commando-auto-toggle';
-        actionBtn.type = 'button';
-        actionBtn.style.cssText = 'padding: 8px; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; color: white; text-align: center; font-size: 13px; transition: background 0.2s;';
-
-        actionBtn.addEventListener('click', () => {
-            if (AutoMode.isActive()) {
-                AutoMode.stop();
-            } else {
-                AutoMode.start();
-                triggerAllOnPage();
-            }
-            updateFloatingPanel();
-        });
-
-        panel.appendChild(actionBtn);
         document.body.appendChild(panel);
     }
 
     function updateFloatingPanel() {
-        const actionBtn = document.getElementById('commando-auto-toggle');
-        if (!actionBtn) return;
-
-        if (AutoMode.isActive()) {
-            actionBtn.innerText = '⏹ Остановить автопилот';
-            actionBtn.style.backgroundColor = '#dc3545';
-        } else {
-            actionBtn.innerText = '▶ Запустить автопилот';
-            actionBtn.style.backgroundColor = '#28a745';
-        }
-    }
-
-    function triggerAllOnPage() {
-        document.querySelectorAll('.auto-solve-btn').forEach(btn => {
-            if (!btn.disabled && btn.innerText === 'Решить вопрос') {
-                btn.click();
-            }
-        });
+        // Заглушка обновления состояния панели автопилота при необходимости
     }
 
     // --- ИНИЦИАЛИЗАЦИЯ СКРИПТА ---
-    showInitialLoader();
-
     if (window.location.href.includes('review.php')) {
-        runReviewAndSave();
+        showInitialLoader();
+        if (document.readyState === 'complete') {
+            runReviewAndSave();
+        } else {
+            window.addEventListener('load', runReviewAndSave);
+        }
     } else if (window.location.href.includes('attempt.php')) {
         addButtons();
         createFloatingPanel();
-        updateFloatingPanel();
-
-        if (AutoMode.isActive()) {
-            triggerAllOnPage();
-        }
-
-        // Динамический трекинг появления новых вопросов (защита от AJAX-пагинации Moodle)
+        
+        // Наблюдатель на случай динамической подгрузки вопросов Moodle (AJAX)
         const observer = new MutationObserver(() => {
             addButtons();
-            if (AutoMode.isActive() && activeRequestsOnPage === 0) {
-                triggerAllOnPage();
-            }
         });
         observer.observe(document.body, { childList: true, subtree: true });
     }
