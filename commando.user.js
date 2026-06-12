@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Moodle-Commando
 // @namespace    http://tampermonkey.net/
-// @version      10.7
+// @version      10.8
 // @description  Автоматизированный помощник для работы с тестами Moodle. Интеграция с локальной базой знаний Firebase для мгновенных ответов и умный разбор сложных вопросов с помощью моделей ИИ Gemini.
 // @author       Bobna
 // @match        https://edu-spcpu.ru/mod/quiz/attempt.php*
@@ -11,8 +11,8 @@
 // @connect      eios-e526f-default-rtdb.europe-west1.firebasedatabase.app
 // @connect      *
 // @run-at       document-end
-// @updateURL https://github.com/Bobnarva/moodle-commando/raw/refs/heads/main/commando.user.js
-// @downloadURL https://github.com/Bobnarva/moodle-commando/raw/refs/heads/main/commando.user.js
+// @updateURL    https://github.com/Bobnarva/moodle-commando/raw/refs/heads/main/commando.user.js
+// @downloadURL  https://github.com/Bobnarva/moodle-commando/raw/refs/heads/main/commando.user.js
 // ==/UserScript==
 
 (function() {
@@ -33,7 +33,7 @@
 
     let activeRequestsOnPage = 0;
 
-    console.log('%c[Moodle Commando v10.7] Ранний старт интерфейса активирован.', 'color: #007bff; font-weight: bold;');
+    console.log('%c[Moodle Commando v10.8] Ранний старт интерфейса активирован.', 'color: #007bff; font-weight: bold;');
 
     // --- СЕРВИСНЫЕ ФУНКЦИИ АВТОХОДА И СТАТИСТИКИ ---
     const AutoMode = {
@@ -273,7 +273,6 @@
                 if (typeCounters[item.type] !== undefined) typeCounters[item.type]++;
             });
 
-            // Переключаем плашку в режим активной выгрузки контента
             if (contentEl) {
                 contentEl.innerHTML = `
                     <div style="font-size: 13px; font-weight: bold; margin-bottom: 2px; color: #fd7e14;">Синхронизация с базой...</div>
@@ -321,7 +320,6 @@
                 }
             });
         } else {
-            // Если новых ответов для базы нет, просто скрываем пустую плашку
             if (loaderNotice) loaderNotice.remove();
             console.log('[REVIEW] Нет новых уникальных ответов для добавления.');
         }
@@ -501,46 +499,55 @@
         button.disabled = true;
         button.innerText = '🔍 Поиск в БД...';
 
+        // Изолированная функция-фолбек для ухода на ИИ при любых ошибках базы данных
+        const switchToAi = () => {
+            button.innerText = '📷 Сбор структуры...';
+            const qData = parseQuestionStructure(questionBlock, qType);
+
+            let promptText = `Ты — экспертный ИИ-модуль тестирования. Реши задачу и выведи результат СТРОГО в формате JSON без какого-либо другого текста вокруг.\n\n`;
+
+            if (qType === 'multichoice') {
+                promptText += `Вопрос: "${qData.questionText}"\nВарианты:\n${qData.elements.map(e => `- ID: ${e.id} | Текст: ${e.text}`).join('\n')}\n\nВыведи: {"type": "multichoice", "answers": ["ID_верного_варианта"]}`;
+            }
+            else if (qType === 'truefalse') {
+                promptText += `Вопрос: "${qData.questionText}"\nВарианты:\n${qData.elements.map(e => `- ID: ${e.id} | Текст: ${e.text}`).join('\n')}\n\nВыведи: {"type": "truefalse", "answers": ["ID_выбранного_варианта"]}`;
+            }
+            else if (qType === 'shortanswer') {
+                promptText += `Вопрос: "${qData.questionText}"\n\nВыведи: {"type": "shortanswer", "id": "${qData.elements[0].id}", "text": "ТвойОтветЗдесь"}`;
+            }
+            else if (qType === 'match') {
+                promptText += `Общий вопрос: "${qData.questionText}"\nЗадания:\n${qData.elements.map(e => `Селект ID: "${e.selectId}" для вопроса: "${e.subQuestion}"\nОпции:\n${e.options.map(o => `  - Value: "${o.value}" -> "${o.text}"`).join('\n')}`).join('\n\n')}\n\nВыведи: {"type": "match", "mappings": {"Селект_ID": "Выбранное_Value"}}`;
+            }
+
+            const imgElements = questionBlock.querySelectorAll('.qtext img');
+            let imagePromises = [];
+            imgElements.forEach(img => {
+                let src = img.getAttribute('src');
+                if (src) imagePromises.push(fetchImageAsBase64(new URL(src, document.baseURI).href));
+            });
+
+            Promise.all(imagePromises).then(downloadedImages => {
+                let payloadParts = [{ text: promptText }];
+                downloadedImages.forEach(imgData => { payloadParts.push({ inlineData: { mimeType: imgData.mimeType, data: imgData.data } }); });
+                sendAiRequest(payloadParts, downloadedImages.length > 0 ? MULTIMODAL_MODELS : TEXT_ONLY_MODELS, 0, questionBlock, button, qType, qHash);
+            }).catch(() => {
+                sendAiRequest([{ text: promptText }], TEXT_ONLY_MODELS, 0, questionBlock, button, qType, qHash);
+            });
+        };
+
         GM_xmlhttpRequest({
-            method: "GET", url: `${FIREBASE_URL}questions/${qHash}.json`,
+            method: "GET",
+            url: `${FIREBASE_URL}questions/${qHash}.json`,
+            timeout: 10000,
             onload: function(response) {
                 if (response.status === 200 && response.responseText !== 'null') {
                     fillFromDatabase(questionBlock, JSON.parse(response.responseText), button, qHash);
                 } else {
-                    button.innerText = '📷 Сбор структуры...';
-                    const qData = parseQuestionStructure(questionBlock, qType);
-
-                    let promptText = `Ты — экспертный ИИ-модуль тестирования. Реши задачу и выведи результат СТРОГО в формате JSON без какого-либо другого текста вокруг.\n\n`;
-
-                    if (qType === 'multichoice') {
-                        promptText += `Вопрос: "${qData.questionText}"\nВарианты:\n${qData.elements.map(e => `- ID: ${e.id} | Текст: ${e.text}`).join('\n')}\n\nВыведи: {"type": "multichoice", "answers": ["ID_верного_варианта"]}`;
-                    }
-                    else if (qType === 'truefalse') {
-                        promptText += `Вопрос: "${qData.questionText}"\nВарианты:\n${qData.elements.map(e => `- ID: ${e.id} | Текст: ${e.text}`).join('\n')}\n\nВыведи: {"type": "truefalse", "answers": ["ID_выбранного_варианта"]}`;
-                    }
-                    else if (qType === 'shortanswer') {
-                        promptText += `Вопрос: "${qData.questionText}"\n\nВыведи: {"type": "shortanswer", "id": "${qData.elements[0].id}", "text": "ТвойОтветЗдесь"}`;
-                    }
-                    else if (qType === 'match') {
-                        promptText += `Общий вопрос: "${qData.questionText}"\nЗадания:\n${qData.elements.map(e => `Селект ID: "${e.selectId}" для вопроса: "${e.subQuestion}"\nОпции:\n${e.options.map(o => `  - Value: "${o.value}" -> "${o.text}"`).join('\n')}`).join('\n\n')}\n\nВыведи: {"type": "match", "mappings": {"Селект_ID": "Выбранное_Value"}}`;
-                    }
-
-                    const imgElements = questionBlock.querySelectorAll('.qtext img');
-                    let imagePromises = [];
-                    imgElements.forEach(img => {
-                        let src = img.getAttribute('src');
-                        if (src) imagePromises.push(fetchImageAsBase64(new URL(src, document.baseURI).href));
-                    });
-
-                    Promise.all(imagePromises).then(downloadedImages => {
-                        let payloadParts = [{ text: promptText }];
-                        downloadedImages.forEach(imgData => { payloadParts.push({ inlineData: { mimeType: imgData.mimeType, data: imgData.data } }); });
-                        sendAiRequest(payloadParts, downloadedImages.length > 0 ? MULTIMODAL_MODELS : TEXT_ONLY_MODELS, 0, questionBlock, button, qType, qHash);
-                    }).catch(() => {
-                        sendAiRequest([{ text: promptText }], TEXT_ONLY_MODELS, 0, questionBlock, button, qType, qHash);
-                    });
+                    switchToAi();
                 }
-            }
+            },
+            onerror: switchToAi,
+            ontimeout: switchToAi
         });
     }
 
@@ -556,7 +563,8 @@
             btn.type = 'button';
             btn.className = 'auto-solve-btn';
             btn.innerText = 'Решить вопрос';
-            btn.style.cssText = 'display: inline-block; margin-bottom: 10px; padding: 8px 16px; background-color: #bae1f7; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; width: max-content; min-width: 180px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1);';
+            // Изменен цвет фона с #bae1f7 на #007bff для нормальной контрастности текста
+            btn.style.cssText = 'display: inline-block; margin-bottom: 10px; padding: 8px 16px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; width: max-content; min-width: 180px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1);';
 
             btn.addEventListener('click', () => processQuestion(q, btn));
             formulationBlock.insertBefore(btn, formulationBlock.firstChild);
@@ -584,7 +592,7 @@
         const actionBtn = document.createElement('button');
         actionBtn.id = 'commando-auto-toggle';
         actionBtn.type = 'button';
-        actionBtn.style.cssText = 'padding: 8px; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; color: white; text-align: center; font-size: 13px;';
+        actionBtn.style.cssText = 'padding: 8px; font-weight: bold; border: none; border-radius: 4px; cursor: pointer; color: white; text-align: center; font-size: 13px; transition: background 0.2s;';
 
         actionBtn.addEventListener('click', () => {
             if (AutoMode.isActive()) {
@@ -595,57 +603,53 @@
             }
             updateFloatingPanel();
         });
+
         panel.appendChild(actionBtn);
         document.body.appendChild(panel);
-        updateFloatingPanel();
     }
 
     function updateFloatingPanel() {
-        const btn = document.getElementById('commando-auto-toggle');
-        if (!btn) return;
+        const actionBtn = document.getElementById('commando-auto-toggle');
+        if (!actionBtn) return;
+
         if (AutoMode.isActive()) {
-            btn.innerText = 'Остановить Авто-тест';
-            btn.style.backgroundColor = '#dc3545';
+            actionBtn.innerText = '⏹ Остановить автопилот';
+            actionBtn.style.backgroundColor = '#dc3545';
         } else {
-            btn.innerText = 'Запустить Авто-Тест';
-            btn.style.backgroundColor = '#28a745';
+            actionBtn.innerText = '▶ Запустить автопилот';
+            actionBtn.style.backgroundColor = '#28a745';
         }
     }
 
     function triggerAllOnPage() {
-        const unhandledButtons = Array.from(document.querySelectorAll('.auto-solve-btn')).filter(b => !b.disabled);
-        if (unhandledButtons.length === 0) {
-            checkPageCompletion();
-            return;
-        }
-        unhandledButtons.forEach(btn => btn.click());
+        document.querySelectorAll('.auto-solve-btn').forEach(btn => {
+            if (!btn.disabled && btn.innerText === 'Решить вопрос') {
+                btn.click();
+            }
+        });
     }
 
-    // =========================================================================
-    // ТОЧКА ВХОДА С УЛУЧШЕННЫМ ТАЙМИНГОМ СТАРТА
-    // =========================================================================
-    if (window.location.href.includes('review.php')) {
-        // Мгновенно отрисовываем оранжевый виджет "вслепую", не дожидаясь разбора страницы
-        showInitialLoader();
+    // --- ИНИЦИАЛИЗАЦИЯ СКРИПТА ---
+    showInitialLoader();
 
-        // Запускаем сбор и отправку данных сразу при готовности DOM структуры, игнорируя картинки
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', runReviewAndSave);
-        } else {
-            runReviewAndSave();
-        }
-    } else {
-        createFloatingPanel();
-        const observer = new MutationObserver(() => { addButtons(); createFloatingPanel(); });
-        observer.observe(document.body, { childList: true, subtree: true });
+    if (window.location.href.includes('review.php')) {
+        runReviewAndSave();
+    } else if (window.location.href.includes('attempt.php')) {
         addButtons();
+        createFloatingPanel();
+        updateFloatingPanel();
 
         if (AutoMode.isActive()) {
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', () => setTimeout(triggerAllOnPage, 1000));
-            } else {
-                setTimeout(triggerAllOnPage, 1000);
-            }
+            triggerAllOnPage();
         }
+
+        // Динамический трекинг появления новых вопросов (защита от AJAX-пагинации Moodle)
+        const observer = new MutationObserver(() => {
+            addButtons();
+            if (AutoMode.isActive() && activeRequestsOnPage === 0) {
+                triggerAllOnPage();
+            }
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
     }
 })();
