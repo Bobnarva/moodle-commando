@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      12.2
 // @description  Автоматизированный помощник для работы с тестами Moodle. Интеграция с локальной базой знаний Firebase для мгновенных ответов и умный разбор сложных вопросов с помощью ИИ.
-// @author       Bobna (Refactored by AI)
+// @author       Bobna
 // @match        https://edu-spcpu.ru/mod/quiz/attempt.php*
 // @match        https://edu-spcpu.ru/mod/quiz/review.php*
 // @grant        GM_xmlhttpRequest
@@ -426,12 +426,12 @@
             if (AutoMode.isActive()) {
                 AutoMode.stop();
                 autopilotBtn.classList.remove('btn-active');
-                autopilotBtn.innerText = '[🔴 АВТОПИЛОТ: ВЫКЛ]';
+                autopilotBtn.innerText = '[АВТОПИЛОТ: ВЫКЛ]';
                 dashboard.classList.remove('autopilot-active');
             } else {
                 AutoMode.start();
                 autopilotBtn.classList.add('btn-active');
-                autopilotBtn.innerText = '[🟢 АВТОПИЛОТ: ВКЛ]';
+                autopilotBtn.innerText = '[АВТОПИЛОТ: ВКЛ]';
                 dashboard.classList.add('autopilot-active');
                 // Запускаем решение нерешенных
                 document.querySelectorAll('.que').forEach(q => {
@@ -475,9 +475,9 @@
         const routeSelect = document.createElement('select');
         routeSelect.className = 'commando-select';
         routeSelect.innerHTML = `
-            <option value="auto">Smart Auto (Эвристический выбор)</option>
-            <option value="lite">Gemini 3.1 Flash-Lite (Экономный)</option>
-            <option value="flash">Gemini 3.5 Flash (Сложный)</option>
+            <option value="auto">Smart Auto (auto)</option>
+            <option value="lite">Gemini 3.1 Flash-Lite (fast)</option>
+            <option value="flash">Gemini 3.5 Flash (think)</option>
         `;
         routeSelect.value = RoutingManager.getMode();
         routeSelect.addEventListener('change', (e) => {
@@ -534,6 +534,7 @@
             1. Перейдите на <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>.<br>
             2. Нажмите <b>Get API Key</b>.<br>
             3. Сгенерируйте и вставьте его выше.
+            Примечание: Стандартные лимиты быстро истекут, рекомендуем привязать личный API.
         `;
 
         keyDrawer.appendChild(kInput);
