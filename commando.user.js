@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Moodle-Commando
 // @namespace    http://tampermonkey.net/
-// @version      12.5
-// @description  Автоматизированный помощник для работы с тестами Moodle. Интеграция с локальной базой знаний Firebase для мгновенных ответов и умный разбор сложных вопросов с помощью ИИ.
+// @version      13.1
+// @description  Автоматизированный помощник для работы с тестами Moodle. Интеграция с базой знаний Firebase и мульти-провайдерный ИИ-решатель (Gemini, Groq, OpenRouter).
 // @author       Bobna (Refactored by AI)
 // @match        https://edu-spcpu.ru/mod/quiz/attempt.php*
 // @match        https://edu-spcpu.ru/mod/quiz/review.php*
@@ -10,6 +10,8 @@
 // @match        https://edu-spcpu.ru/course/view.php*
 // @grant        GM_xmlhttpRequest
 // @connect      generativelanguage.googleapis.com
+// @connect      api.groq.com
+// @connect      openrouter.ai
 // @connect      eios-e526f-default-rtdb.europe-west1.firebasedatabase.app
 // @connect      *
 // @run-at       document-end
@@ -21,17 +23,104 @@
     'use strict';
     const p_1 = 'AQ.Ab8RN6JBHJCzBZsAZh3n2KG';
     const p_2 = '-zGX_FOUv_-Hq5JvCGg1PtdtnWg';
-    const DEFAULT_API_KEY = p_1 + p_2; // Резервный ключ
+    const DEFAULT_GEMINI_KEY = p_1 + p_2;
+
     const FIREBASE_URL = 'https://eios-e526f-default-rtdb.europe-west1.firebasedatabase.app/';
     const STORAGE_KEY = 'moodle_inserted_answers';
-    const KEY_API_STORAGE = 'commando_gemini_api_key';
+
+    const KEY_GEMINI_STORAGE = 'commando_gemini_api_key';
+    const KEY_GROQ_STORAGE = 'commando_groq_api_key';
+    const KEY_OPENROUTER_STORAGE = 'commando_openrouter_api_key';
+
     const KEY_ROUTING_MODE = 'commando_routing_mode';
     const KEY_UI_COLLAPSED = 'commando_ui_collapsed';
     const KEY_LOGS_EXPANDED = 'commando_logs_expanded';
 
-    // Модели
-    const MODEL_LITE = 'gemini-3.8-flash';
-    const MODEL_FLASH = 'gemini-4-hydrogen';
+    // Каталог моделей с профилем задачи: (fast), (medium), (smart)
+    const MODEL_CATALOG = {
+        // Gemini
+        gemini_31_flash_lite: {
+            id: 'gemini-3.1-flash-lite',
+            provider: 'gemini',
+            label: 'Gemini 3.1 Flash-Lite (fast)',
+            vision: true,
+            profile: 'fast'
+        },
+        gemini_35_flash: {
+            id: 'gemini-3.5-flash',
+            provider: 'gemini',
+            label: 'Gemini 3.5 Flash (medium)',
+            vision: true,
+            profile: 'medium'
+        },
+        gemini_38_flash: {
+            id: 'gemini-3.8-flash',
+            provider: 'gemini',
+            label: 'Gemini 3.8 Flash (smart)',
+            vision: true,
+            profile: 'smart'
+        },
+
+        // Groq
+        groq_gpt_oss_20b: {
+            id: 'openai/gpt-oss-20b',
+            provider: 'groq',
+            label: 'Groq GPT-OSS 20B (fast)',
+            vision: false,
+            profile: 'fast'
+        },
+        groq_qwen38_27b: {
+            id: 'qwen/qwen3.8-27b',
+            provider: 'groq',
+            label: 'Groq Qwen 3.8 27B (medium)',
+            vision: false,
+            profile: 'medium'
+        },
+        groq_gpt_oss_120b: {
+            id: 'openai/gpt-oss-120b',
+            provider: 'groq',
+            label: 'Groq GPT-OSS 120B (smart)',
+            vision: false,
+            profile: 'smart'
+        },
+
+        // OpenRouter (:free)
+        or_lightning_free: {
+            id: 'nvidia/nemotron-3.5-lightning:free',
+            provider: 'openrouter',
+            label: 'OR Nemotron 3.5 Lightning (fast)',
+            vision: false,
+            profile: 'fast'
+        },
+        or_ernie_free: {
+            id: 'baidu/ernie-5.5-flash-preview:free',
+            provider: 'openrouter',
+            label: 'OR ERNIE 5.5 Flash (medium)',
+            vision: false,
+            profile: 'medium'
+        },
+        or_nemotron_vl_free: {
+            id: 'nvidia/nemotron-3-super-vl:free',
+            provider: 'openrouter',
+            label: 'OR Nemotron 3 Super VL (smart)',
+            vision: true,
+            profile: 'smart'
+        },
+        or_nemotron_ultra_free: {
+            id: 'nvidia/nemotron-3-ultra:free',
+            provider: 'openrouter',
+            label: 'OR Nemotron 3 Ultra (smart)',
+            vision: false,
+            profile: 'smart'
+        },
+        or_auto_free: {
+            id: 'openrouter/free',
+            provider: 'openrouter',
+            label: 'OR Auto Free Router (medium)',
+            vision: true,
+            profile: 'medium'
+        }
+    };
 
     let activeRequestsOnPage = 0;
 
@@ -42,11 +131,9 @@
             const logEntry = { time, text, level };
             this.logs.push(logEntry);
 
-            // Вывод в консоль разработчика
             const colors = { info: '#9DB4C0', success: '#CEDOCE', warn: '#ffcc00', error: '#ff3333' };
             console.log(`%c[Commando OS] [${time}] ${text}`, `color: ${colors[level] || '#9DB4C0'};`);
 
-            // Обновление UI терминала
             const logPanel = document.getElementById('commando-log-terminal');
             if (logPanel) {
                 const item = document.createElement('div');
@@ -59,54 +146,153 @@
         }
     };
 
-    Logger.add('Запуск ядра Commando v12.5...', 'info');
+    Logger.add('Запуск ядра Commando v13.1...', 'info');
 
-    // Умное управление API-ключами с защитой от пустых строк и лишних пробелов
+    function sanitizeStoredValue(val) {
+        if (!val) return null;
+        const trimmed = val.trim();
+        if (!trimmed || trimmed === 'null' || trimmed === 'undefined') return null;
+        return trimmed;
+    }
+
     const KeyManager = {
-        get: () => {
-            const stored = localStorage.getItem(KEY_API_STORAGE);
-            if (stored && stored.trim() !== "" && stored !== "null" && stored !== "undefined") {
-                return stored.trim();
+        getProviderKey: (provider) => {
+            if (provider === 'gemini') {
+                return sanitizeStoredValue(localStorage.getItem(KEY_GEMINI_STORAGE)) || DEFAULT_GEMINI_KEY;
             }
-            return DEFAULT_API_KEY;
+            if (provider === 'groq') {
+                return sanitizeStoredValue(localStorage.getItem(KEY_GROQ_STORAGE));
+            }
+            if (provider === 'openrouter') {
+                return sanitizeStoredValue(localStorage.getItem(KEY_OPENROUTER_STORAGE));
+            }
+            return null;
         },
-        set: (key) => {
-            if (key && key.trim() !== "" && key.trim() !== "null" && key.trim() !== "undefined") {
-                localStorage.setItem(KEY_API_STORAGE, key.trim());
+        setProviderKey: (provider, key) => {
+            const storageMap = {
+                gemini: KEY_GEMINI_STORAGE,
+                groq: KEY_GROQ_STORAGE,
+                openrouter: KEY_OPENROUTER_STORAGE
+            };
+            const storageKey = storageMap[provider];
+            if (!storageKey) return;
+
+            const clean = sanitizeStoredValue(key);
+            if (clean) {
+                localStorage.setItem(storageKey, clean);
             } else {
-                localStorage.removeItem(KEY_API_STORAGE);
+                localStorage.removeItem(storageKey);
             }
         },
-        isCustom: () => {
-            const stored = localStorage.getItem(KEY_API_STORAGE);
-            return stored !== null && stored.trim() !== "" && stored !== "null" && stored !== "undefined";
+        isCustomGemini: () => sanitizeStoredValue(localStorage.getItem(KEY_GEMINI_STORAGE)) !== null,
+        hasKey: (provider) => {
+            const k = KeyManager.getProviderKey(provider);
+            return Boolean(k && k.length > 8);
         },
-        getMasked: () => {
-            const key = KeyManager.get();
-            if (key.length <= 8) return "INVALID_KEY";
-            return key.substring(0, 6) + "..." + key.substring(key.length - 4);
+        getMasked: (provider = 'gemini') => {
+            const key = KeyManager.getProviderKey(provider);
+            if (!key || key.length <= 8) return 'NOT_SET';
+            return key.substring(0, 6) + '...' + key.substring(key.length - 4);
         }
     };
 
     const RoutingManager = {
-        getMode: () => localStorage.getItem(KEY_ROUTING_MODE) || 'auto', // По умолчанию "auto"
+        getMode: () => localStorage.getItem(KEY_ROUTING_MODE) || 'smart_auto',
         setMode: (mode) => localStorage.setItem(KEY_ROUTING_MODE, mode),
-        selectModel: (questionBlock, qType) => {
-            const mode = RoutingManager.getMode();
-            if (mode === 'flash') return MODEL_FLASH;
-            if (mode === 'lite') return MODEL_LITE;
 
-            // Оптимизация запросов (Smart Auto-Routing)
+        classifyQuestion: (questionBlock, qType) => {
             const hasImages = questionBlock.querySelector('.qtext img, .answer img') !== null;
-            const isComplexType = qType === 'match';
-            const textLength = extractCleanText(questionBlock.querySelector('.qtext')).length;
-
-            if (hasImages || isComplexType || textLength > 450) {
-                Logger.add('Smart Router: Сложный/мультимедиа вопрос. Выбран 3.5 Flash.', 'info');
-                return MODEL_FLASH;
+            const textLen = extractCleanText(questionBlock.querySelector('.qtext')).length;
+            if (hasImages || qType === 'match' || textLen > 450) {
+                return 'smart';
             }
-            Logger.add('Smart Router: Простой текстовый вопрос. Выбран 3.1 Flash-Lite.', 'success');
-            return MODEL_LITE;
+            if (qType === 'multichoice' || textLen > 180) {
+                return 'medium';
+            }
+            return 'fast';
+        },
+
+        buildChain: (questionBlock, qType) => {
+            const mode = RoutingManager.getMode();
+            const complexity = RoutingManager.classifyQuestion(questionBlock, qType);
+
+            if (MODEL_CATALOG[mode]) {
+                const primary = MODEL_CATALOG[mode];
+                const rest = Object.keys(MODEL_CATALOG)
+                    .filter(k => k !== mode)
+                    .map(k => MODEL_CATALOG[k]);
+                return [primary, ...rest];
+            }
+
+            if (mode === 'only_fast') {
+                return [
+                    MODEL_CATALOG.groq_gpt_oss_20b,
+                    MODEL_CATALOG.gemini_31_flash_lite,
+                    MODEL_CATALOG.or_lightning_free,
+                    MODEL_CATALOG.groq_qwen38_27b,
+                    MODEL_CATALOG.gemini_35_flash,
+                    MODEL_CATALOG.or_auto_free
+                ];
+            }
+
+            if (mode === 'only_medium') {
+                return [
+                    MODEL_CATALOG.gemini_35_flash,
+                    MODEL_CATALOG.groq_qwen38_27b,
+                    MODEL_CATALOG.or_ernie_free,
+                    MODEL_CATALOG.or_auto_free,
+                    MODEL_CATALOG.gemini_31_flash_lite,
+                    MODEL_CATALOG.groq_gpt_oss_20b
+                ];
+            }
+
+            if (mode === 'only_smart') {
+                return [
+                    MODEL_CATALOG.gemini_38_flash,
+                    MODEL_CATALOG.groq_gpt_oss_120b,
+                    MODEL_CATALOG.or_nemotron_vl_free,
+                    MODEL_CATALOG.or_nemotron_ultra_free,
+                    MODEL_CATALOG.gemini_35_flash,
+                    MODEL_CATALOG.groq_qwen38_27b
+                ];
+            }
+
+            // smart_auto: подстраивается под сложность вопроса и доступные ключи
+            if (complexity === 'smart') {
+                Logger.add('Smart Auto [smart]: сложный вопрос/картинка — приоритет smart-моделям.', 'info');
+                return [
+                    MODEL_CATALOG.gemini_38_flash,
+                    MODEL_CATALOG.or_nemotron_vl_free,
+                    MODEL_CATALOG.groq_gpt_oss_120b,
+                    MODEL_CATALOG.or_nemotron_ultra_free,
+                    MODEL_CATALOG.gemini_35_flash,
+                    MODEL_CATALOG.groq_qwen38_27b,
+                    MODEL_CATALOG.or_auto_free
+                ];
+            }
+
+            if (complexity === 'medium') {
+                Logger.add('Smart Auto [medium]: вопрос средней сложности — баланс скорости и точности.', 'info');
+                return [
+                    MODEL_CATALOG.gemini_35_flash,
+                    MODEL_CATALOG.groq_qwen38_27b,
+                    MODEL_CATALOG.or_ernie_free,
+                    MODEL_CATALOG.or_auto_free,
+                    MODEL_CATALOG.gemini_31_flash_lite,
+                    MODEL_CATALOG.groq_gpt_oss_20b,
+                    MODEL_CATALOG.groq_gpt_oss_120b
+                ];
+            }
+
+            Logger.add('Smart Auto [fast]: простой вопрос — запуск на быстрых моделях.', 'success');
+            return [
+                MODEL_CATALOG.groq_gpt_oss_20b,
+                MODEL_CATALOG.gemini_31_flash_lite,
+                MODEL_CATALOG.or_lightning_free,
+                MODEL_CATALOG.groq_qwen38_27b,
+                MODEL_CATALOG.gemini_35_flash,
+                MODEL_CATALOG.or_auto_free
+            ];
         }
     };
 
@@ -227,10 +413,11 @@
     }
 
     function extractCleanJson(rawText) {
-        let start = rawText.indexOf('{');
-        let end = rawText.lastIndexOf('}');
+        let cleaned = rawText.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+        let start = cleaned.indexOf('{');
+        let end = cleaned.lastIndexOf('}');
         if (start !== -1 && end !== -1 && end > start) {
-            return rawText.substring(start, end + 1);
+            return cleaned.substring(start, end + 1);
         }
         throw new Error("No valid JSON found in response");
     }
@@ -252,7 +439,7 @@
             .commando-dashboard {
                 position: fixed; top: 15px; right: 15px; z-index: 999999;
                 background: #253237; color: #E6E8E6; border: 2px solid #9DB4C0;
-                border-radius: 4px; width: 330px; box-shadow: 0 0 20px rgba(37,50,55,0.4);
+                border-radius: 4px; width: 345px; box-shadow: 0 0 20px rgba(37,50,55,0.4);
                 font-family: 'Fira Code', 'Courier New', monospace;
                 font-size: 12px; overflow: hidden; transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), height 0.3s, max-height 0.3s;
                 text-shadow: 0 0 2px rgba(230, 232, 230, 0.2);
@@ -293,7 +480,7 @@
                 border-radius: 2px;
             }
             .commando-collapse-btn:hover { background: #9DB4C0; color: #253237; }
-            .commando-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+            .commando-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; max-height: calc(90vh - 46px); }
 
             .commando-card {
                 background: rgba(92, 107, 115, 0.15); border: 1px solid #5C6B73; padding: 10px; position: relative;
@@ -305,7 +492,6 @@
                 display: flex; justify-content: space-between; align-items: center;
                 border-bottom: 1px dashed #5C6B73; padding-bottom: 4px;
             }
-            .commando-row { display: flex; justify-content: space-between; align-items: center; }
 
             .commando-btn {
                 background: #5C6B73; color: #E6E8E6; border: 1px solid #9DB4C0; padding: 6px 10px;
@@ -321,7 +507,7 @@
 
             .commando-select {
                 background: #253237; color: #E6E8E6; border: 1px solid #9DB4C0;
-                padding: 6px; width: 100%; font-family: 'Fira Code', monospace; font-size: 11px;
+                padding: 6px; width: 100%; font-family: 'Fira Code', monospace; font-size: 10px;
                 outline: none; cursor: pointer; box-sizing: border-box;
                 border-radius: 2px;
             }
@@ -336,12 +522,15 @@
                 outline: none; box-sizing: border-box;
                 border-radius: 2px;
             }
+            .commando-label {
+                font-size: 10px; color: #9DB4C0; margin-bottom: 2px; display: block;
+            }
             .commando-drawer {
                 display: none; flex-direction: column; gap: 8px; margin-top: 8px;
                 border-top: 1px dashed #5C6B73; padding-top: 8px;
             }
             .commando-drawer.active { display: flex; }
-            .commando-help { font-size: 10px; color: #CEDOCE; line-height: 1.3; }
+            .commando-help { font-size: 10px; color: #CEDOCE; line-height: 1.35; }
             .commando-help a { color: #9DB4C0; text-decoration: underline; }
             .commando-mini-trigger {
                 width: 100%; height: 100%; display: flex; align-items: center;
@@ -349,7 +538,6 @@
             }
             .commando-mini-trigger:hover { color: #E6E8E6; }
 
-            /* Стилизация кнопок под стиль EIOS */
             .auto-solve-btn {
                 font-family: 'Fira Code', monospace !important;
                 border: 1px solid #9DB4C0 !important;
@@ -365,7 +553,6 @@
                 color: #253237 !important;
                 box-shadow: 0 0 8px rgba(157,180,192,0.6) !important;
             }
-            /* Стиль кнопки для перепроверки */
             .auto-solve-btn.recheck-ready {
                 border-color: #CEDOCE !important;
                 color: #CEDOCE !important;
@@ -392,18 +579,15 @@
         if (isCollapsed) dashboard.classList.add('collapsed');
         if (AutoMode.isActive()) dashboard.classList.add('autopilot-active');
 
-        // Микро-иконка при сворачивании (в стиле дискового терминала)
         const miniTrigger = document.createElement('div');
         miniTrigger.className = 'commando-mini-trigger';
         miniTrigger.innerText = '[💾]';
         miniTrigger.title = 'Развернуть COMMANDO';
 
-        // Полный интерфейс
         const fullUI = document.createElement('div');
         fullUI.className = 'commando-full-ui';
         fullUI.style.display = isCollapsed ? 'none' : 'block';
 
-        // Клик для раскрытия
         miniTrigger.addEventListener('click', (e) => {
             e.stopPropagation();
             dashboard.classList.remove('collapsed');
@@ -412,13 +596,12 @@
         });
         dashboard.appendChild(miniTrigger);
 
-        // Шапка панели
         const header = document.createElement('div');
         header.className = 'commando-header';
 
         const title = document.createElement('div');
         title.className = 'commando-title';
-        title.innerText = '💾 COMMANDO v12.5';
+        title.innerText = '💾 COMMANDO v13.1';
         header.appendChild(title);
 
         const collapseBtn = document.createElement('button');
@@ -433,7 +616,6 @@
         header.appendChild(collapseBtn);
         fullUI.appendChild(header);
 
-        // Тело панели
         const body = document.createElement('div');
         body.className = 'commando-body';
 
@@ -462,7 +644,6 @@
                 autopilotBtn.classList.add('btn-active');
                 autopilotBtn.innerText = '[АВТОПИЛОТ: ВКЛ]';
                 dashboard.classList.add('autopilot-active');
-                // Запускаем решение нерешенных
                 document.querySelectorAll('.que').forEach(q => {
                     const btn = q.querySelector('.auto-solve-btn');
                     if (btn && !btn.classList.contains('recheck-ready')) btn.click();
@@ -492,37 +673,44 @@
 
         body.appendChild(statCard);
 
-        // 2. Управление моделями (с поддержкой Smart Auto)
+        // 2. Выбор режима и моделей
         const modelCard = document.createElement('div');
         modelCard.className = 'commando-card';
 
         const mTitle = document.createElement('div');
         mTitle.className = 'commando-card-title';
-        mTitle.innerText = 'ВЫБОР МОДЕЛИ ИИ';
+        mTitle.innerText = 'МАРШРУТ И МОДЕЛИ ИИ';
         modelCard.appendChild(mTitle);
 
         const routeSelect = document.createElement('select');
         routeSelect.className = 'commando-select';
-        routeSelect.innerHTML = `
-            <option value="auto">Smart Auto (auto)</option>
-            <option value="lite">Gemini 3.1 Flash-Lite (fast)</option>
-            <option value="flash">Gemini 3.5 Flash (think)</option>
+        let optionsHtml = `
+            <option value="smart_auto">Smart Auto (fast / medium / smart)</option>
+            <option value="only_fast">Только простые вопросы (fast)</option>
+            <option value="only_medium">Только средние вопросы (medium)</option>
+            <option value="only_smart">Только сложные/картинки (smart)</option>
         `;
+        Object.entries(MODEL_CATALOG).forEach(([key, cfg]) => {
+            optionsHtml += `<option value="${key}">${cfg.label}</option>`;
+        });
+        routeSelect.innerHTML = optionsHtml;
         routeSelect.value = RoutingManager.getMode();
+        if (!routeSelect.value) routeSelect.value = 'smart_auto';
+
         routeSelect.addEventListener('change', (e) => {
             RoutingManager.setMode(e.target.value);
-            Logger.add(`Выбран режим маршрутизации: ${e.target.value}`, 'info');
+            Logger.add(`Выбран режим/модель: ${e.target.value}`, 'info');
         });
         modelCard.appendChild(routeSelect);
         body.appendChild(modelCard);
 
-        // 3. Управление ключом Gemini с выводом маски
+        // 3. Управление ключами (Gemini, Groq, OpenRouter)
         const keyCard = document.createElement('div');
         keyCard.className = 'commando-card';
 
         const kTitle = document.createElement('div');
         kTitle.className = 'commando-card-title';
-        kTitle.innerHTML = `КЛЮЧ GEMINI <span id="commando-key-status" style="font-size:9px; color:#CEDOCE;">(DEFAULT)</span>`;
+        kTitle.innerHTML = `API-КЛЮЧИ <span id="commando-key-status" style="font-size:9px; color:#CEDOCE;"></span>`;
         keyCard.appendChild(kTitle);
 
         const maskedLabel = document.createElement('div');
@@ -530,55 +718,83 @@
         maskedLabel.style.fontSize = '10px';
         maskedLabel.style.color = '#CEDOCE';
         maskedLabel.style.marginBottom = '6px';
-        maskedLabel.innerHTML = `Текущий: <span style="color: #9DB4C0; font-weight: bold;">${KeyManager.getMasked()}</span>`;
+        maskedLabel.style.lineHeight = '1.4';
+
+        const refreshKeyLabels = () => {
+            maskedLabel.innerHTML =
+                `Gemini: <span style="color:#9DB4C0;">${KeyManager.getMasked('gemini')}</span><br>` +
+                `Groq: <span style="color:#9DB4C0;">${KeyManager.getMasked('groq')}</span><br>` +
+                `OpenRouter: <span style="color:#9DB4C0;">${KeyManager.getMasked('openrouter')}</span>`;
+
+            const activeCount = ['gemini', 'groq', 'openrouter'].filter(p => KeyManager.hasKey(p)).length;
+            const statusEl = document.getElementById('commando-key-status');
+            if (statusEl) {
+                statusEl.innerText = `(${activeCount}/3 АКТИВНО)`;
+                statusEl.style.color = activeCount > 0 ? '#CEDOCE' : '#ff3333';
+            }
+        };
         keyCard.appendChild(maskedLabel);
 
         const toggleKeyDrawerBtn = document.createElement('button');
         toggleKeyDrawerBtn.className = 'commando-btn btn-secondary';
-        toggleKeyDrawerBtn.innerText = '[ НАСТРОИТЬ КЛЮЧ ]';
+        toggleKeyDrawerBtn.innerText = '[ НАСТРОИТЬ КЛЮЧИ ]';
 
         const keyDrawer = document.createElement('div');
         keyDrawer.className = 'commando-drawer';
 
-        const kInput = document.createElement('input');
-        kInput.type = 'password';
-        kInput.className = 'commando-input';
-        kInput.placeholder = 'Вставьте API Key...';
-        if (KeyManager.isCustom()) {
-            kInput.value = KeyManager.get();
-        }
+        const gemLabel = document.createElement('span');
+        gemLabel.className = 'commando-label';
+        gemLabel.innerText = 'Gemini API Key (AIza...):';
+        const gemInput = document.createElement('input');
+        gemInput.type = 'password';
+        gemInput.className = 'commando-input';
+        gemInput.placeholder = 'Оставьте пустым для default';
+        if (KeyManager.isCustomGemini()) gemInput.value = KeyManager.getProviderKey('gemini');
+
+        const groqLabel = document.createElement('span');
+        groqLabel.className = 'commando-label';
+        groqLabel.innerText = 'Groq API Key (gsk_...):';
+        const groqInput = document.createElement('input');
+        groqInput.type = 'password';
+        groqInput.className = 'commando-input';
+        groqInput.placeholder = 'gsk_... (console.groq.com)';
+        if (KeyManager.hasKey('groq')) groqInput.value = KeyManager.getProviderKey('groq');
+
+        const orLabel = document.createElement('span');
+        orLabel.className = 'commando-label';
+        orLabel.innerText = 'OpenRouter API Key (sk-or-...):';
+        const orInput = document.createElement('input');
+        orInput.type = 'password';
+        orInput.className = 'commando-input';
+        orInput.placeholder = 'sk-or-v1-... (openrouter.ai)';
+        if (KeyManager.hasKey('openrouter')) orInput.value = KeyManager.getProviderKey('openrouter');
 
         const kSaveBtn = document.createElement('button');
         kSaveBtn.className = 'commando-btn btn-active';
-        kSaveBtn.innerText = '[ СОХРАНИТЬ ]';
+        kSaveBtn.innerText = '[ СОХРАНИТЬ КЛЮЧИ ]';
         kSaveBtn.addEventListener('click', () => {
-            const val = kInput.value.trim();
-            if (val) {
-                KeyManager.set(val);
-                Logger.add(`Сохранен пользовательский ключ API: ${KeyManager.getMasked()}`, 'success');
-                updateKeyStatus(true);
-            } else {
-                localStorage.removeItem(KEY_API_STORAGE);
-                Logger.add('Используется встроенный API-ключ по умолчанию.', 'warn');
-                updateKeyStatus(false);
-            }
-            const label = document.getElementById('commando-masked-key-label');
-            if (label) {
-                label.innerHTML = `Текущий: <span style="color: #9DB4C0; font-weight: bold;">${KeyManager.getMasked()}</span>`;
-            }
+            KeyManager.setProviderKey('gemini', gemInput.value);
+            KeyManager.setProviderKey('groq', groqInput.value);
+            KeyManager.setProviderKey('openrouter', orInput.value);
+            refreshKeyLabels();
+            Logger.add('Ключи провайдеров обновлены.', 'success');
         });
 
         const kInstructions = document.createElement('div');
         kInstructions.className = 'commando-help';
         kInstructions.innerHTML = `
-            Порядок действий:<br>
-            1. Перейдите на <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a>.<br>
-            2. Нажмите <b>Get API Key</b>.<br>
-            3. Сгенерируйте и вставьте его выше.<br>
-            <span style="color: #ff3333;">Внимание:</span> Встроенный ключ часто блокируется. Рекомендуется использовать персональный токен.
+            Провайдеры:<br>
+            • <a href="https://aistudio.google.com/" target="_blank">Google AI Studio</a> (Gemini)<br>
+            • <a href="https://console.groq.com/" target="_blank">Groq Console</a> (GPT-OSS / Qwen)<br>
+            • <a href="https://openrouter.ai/keys" target="_blank">OpenRouter</a> (модели <code>:free</code>)
         `;
 
-        keyDrawer.appendChild(kInput);
+        keyDrawer.appendChild(gemLabel);
+        keyDrawer.appendChild(gemInput);
+        keyDrawer.appendChild(groqLabel);
+        keyDrawer.appendChild(groqInput);
+        keyDrawer.appendChild(orLabel);
+        keyDrawer.appendChild(orInput);
         keyDrawer.appendChild(kSaveBtn);
         keyDrawer.appendChild(kInstructions);
         keyCard.appendChild(toggleKeyDrawerBtn);
@@ -588,14 +804,6 @@
         toggleKeyDrawerBtn.addEventListener('click', () => {
             keyDrawer.classList.toggle('active');
         });
-
-        const updateKeyStatus = (isCustom) => {
-            const statusEl = document.getElementById('commando-key-status');
-            if (statusEl) {
-                statusEl.innerText = isCustom ? '(CUSTOM)' : '(DEFAULT)';
-                statusEl.style.color = isCustom ? '#CEDOCE' : '#9DB4C0';
-            }
-        };
 
         // 4. Терминал логов
         const logCard = document.createElement('div');
@@ -631,10 +839,8 @@
         dashboard.appendChild(fullUI);
         document.body.appendChild(dashboard);
 
-        // Инициализация статуса ключа в UI
-        updateKeyStatus(KeyManager.isCustom());
+        refreshKeyLabels();
 
-        // Заполнение истории логов при открытии
         Logger.logs.forEach(log => {
             const colors = { info: '#9DB4C0', success: '#CEDOCE', warn: '#ffcc00', error: '#ff3333' };
             const item = document.createElement('div');
@@ -718,94 +924,182 @@
         }
     }
 
-    function sendAiRequest(payloadParts, modelsList, modelIndex, questionBlock, button, qType, qHash, markDone) {
+    function applyAiResult(result, questionBlock) {
+        let actionCount = 0;
+        if ((result.type === 'multichoice' || result.type === 'truefalse') && Array.isArray(result.answers)) {
+            result.answers.forEach(id => {
+                const input = questionBlock.querySelector(`input[id="${id}"]`);
+                if (input && !input.checked) {
+                    input.click();
+                    triggerMoodleEvents(input);
+                    actionCount++;
+                }
+            });
+        } else if (result.type === 'shortanswer' && result.text !== undefined) {
+            const input = questionBlock.querySelector(`input[id="${result.id}"]`) || questionBlock.querySelector('input[type="text"].form-control');
+            if (input) {
+                input.value = String(result.text);
+                triggerMoodleEvents(input);
+                actionCount = 1;
+            }
+        } else if (result.type === 'match' && result.mappings) {
+            for (const [selectId, val] of Object.entries(result.mappings)) {
+                const select = questionBlock.querySelector(`select[id="${selectId}"]`);
+                if (select) {
+                    select.value = val;
+                    triggerMoodleEvents(select);
+                    actionCount++;
+                }
+            }
+        }
+        return actionCount;
+    }
+
+    function dispatchModelRequest(modelCfg, promptText, validImages, onSuccess, onRetry) {
+        const apiKey = KeyManager.getProviderKey(modelCfg.provider);
+        if (!apiKey) {
+            Logger.add(`Пропуск [${modelCfg.id}]: не задан ключ для ${modelCfg.provider}.`, 'warn');
+            onRetry(false);
+            return;
+        }
+
+        if (modelCfg.provider === 'gemini') {
+            const parts = [{ text: promptText }];
+            validImages.forEach(img => {
+                parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+            });
+
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: `https://generativelanguage.googleapis.com/v1beta/models/${modelCfg.id}:generateContent?key=${encodeURIComponent(apiKey)}`,
+                headers: { 'Content-Type': 'application/json' },
+                data: JSON.stringify({ contents: [{ parts }] }),
+                timeout: 25000,
+                onload: (res) => {
+                    if (res.status === 200) {
+                        try {
+                            const data = JSON.parse(res.responseText);
+                            const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                            const parsed = JSON.parse(extractCleanJson(rawText));
+                            onSuccess(parsed);
+                        } catch (err) {
+                            Logger.add(`Ошибка разбора ответа [${modelCfg.id}]: ${err.message}`, 'error');
+                            onRetry(false);
+                        }
+                    } else {
+                        Logger.add(`Gemini [${modelCfg.id}] вернул HTTP ${res.status}.`, 'warn');
+                        onRetry(res.status === 429 || res.status === 503);
+                    }
+                },
+                ontimeout: () => {
+                    Logger.add(`Тайм-аут [${modelCfg.id}].`, 'warn');
+                    onRetry(false);
+                },
+                onerror: () => {
+                    Logger.add(`Сетевая ошибка [${modelCfg.id}].`, 'error');
+                    onRetry(false);
+                }
+            });
+            return;
+        }
+
+        const isGroq = modelCfg.provider === 'groq';
+        const url = isGroq
+            ? 'https://api.groq.com/openai/v1/chat/completions'
+            : 'https://openrouter.ai/api/v1/chat/completions';
+
+        const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        };
+        if (!isGroq) {
+            headers['HTTP-Referer'] = window.location.origin;
+            headers['X-Title'] = 'Moodle-Commando';
+        }
+
+        let contentPayload = promptText;
+        if (modelCfg.vision && validImages.length > 0) {
+            contentPayload = [
+                { type: 'text', text: promptText },
+                ...validImages.map(img => ({
+                    type: 'image_url',
+                    image_url: { url: `data:${img.mimeType};base64,${img.data}` }
+                }))
+            ];
+        }
+
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: url,
+            headers: headers,
+            data: JSON.stringify({
+                model: modelCfg.id,
+                temperature: 0.1,
+                messages: [{ role: 'user', content: contentPayload }]
+            }),
+            timeout: 25000,
+            onload: (res) => {
+                if (res.status === 200) {
+                    try {
+                        const data = JSON.parse(res.responseText);
+                        const rawText = data?.choices?.[0]?.message?.content || '';
+                        const parsed = JSON.parse(extractCleanJson(rawText));
+                        onSuccess(parsed);
+                    } catch (err) {
+                        Logger.add(`Ошибка парсинга JSON [${modelCfg.id}]: ${err.message}`, 'error');
+                        onRetry(false);
+                    }
+                } else {
+                    Logger.add(`${modelCfg.provider.toUpperCase()} [${modelCfg.id}] HTTP ${res.status}.`, 'warn');
+                    onRetry(res.status === 429 || res.status === 503);
+                }
+            },
+            ontimeout: () => {
+                Logger.add(`Тайм-аут [${modelCfg.id}].`, 'warn');
+                onRetry(false);
+            },
+            onerror: () => {
+                Logger.add(`Сетевая ошибка [${modelCfg.id}].`, 'error');
+                onRetry(false);
+            }
+        });
+    }
+
+    function sendAiRequest(promptText, validImages, modelsList, modelIndex, questionBlock, button, qType, qHash, markDone) {
         if (modelIndex >= modelsList.length) {
-            button.innerText = '[❌ Все модели перегружены]';
+            button.innerText = '[❌ Все модели недоступны]';
             button.disabled = false;
-            Logger.add(`Критический сбой API: все модели перегружены или неверный API-ключ.`, 'error');
+            Logger.add('Все модели в цепочке не ответили. Проверьте ключи и лимиты.', 'error');
             markDone();
             return;
         }
 
-        const currentModel = modelsList[modelIndex];
-        const shortName = currentModel.replace('gemini-', '');
+        const currentCfg = modelsList[modelIndex];
+        button.innerText = `[${currentCfg.id.split('/').pop()} (${currentCfg.profile})...]`;
+        Logger.add(`Запрос через [${currentCfg.provider}:${currentCfg.id} (${currentCfg.profile})]...`, 'info');
 
-        button.innerText = `[(${shortName}) Генерирует...]`;
-        Logger.add(`Запрос решения через ИИ модель [${currentModel}]...`, 'info');
+        const imagesForModel = currentCfg.vision ? validImages : [];
 
-        const activeApiKey = KeyManager.get();
-
-        GM_xmlhttpRequest({
-            method: "POST", url: `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${activeApiKey}`,
-            headers: { "Content-Type": "application/json" },
-            data: JSON.stringify({ contents: [{ parts: payloadParts }] }),
-            timeout: 25000,
-            onload: function(response) {
-                try {
-                    if (response.status === 503 || response.status === 429) {
-                        const delay = Math.pow(2, modelIndex) * 1000;
-                        Logger.add(`Ошибка ${response.status} на модели ${currentModel}. Попытка через ${delay}мс...`, 'warn');
-                        setTimeout(() => sendAiRequest(payloadParts, modelsList, modelIndex + 1, questionBlock, button, qType, qHash, markDone), delay);
-                        return;
-                    }
-                    if (response.status !== 200) throw new Error(`HTTP ${response.status}: ${response.responseText}`);
-
-                    const resData = JSON.parse(response.responseText);
-                    const aiContent = resData.candidates[0].content.parts[0].text.trim();
-                    const result = JSON.parse(extractCleanJson(aiContent));
-                    let actionCount = 0;
-
-                    if ((result.type === 'multichoice' || result.type === 'truefalse') && Array.isArray(result.answers)) {
-                        result.answers.forEach(id => {
-                            const input = questionBlock.querySelector(`input[id="${id}"]`);
-                            if (input && !input.checked) {
-                                input.click();
-                                triggerMoodleEvents(input);
-                                actionCount++;
-                            }
-                        });
-                    }
-                    else if (result.type === 'shortanswer' && result.text) {
-                        const input = questionBlock.querySelector(`input[id="${result.id}"]`);
-                        if (input) {
-                            input.value = result.text;
-                            triggerMoodleEvents(input);
-                            actionCount = 1;
-                        }
-                    }
-                    else if (result.type === 'match' && result.mappings) {
-                        for (const [selectId, val] of Object.entries(result.mappings)) {
-                            const select = questionBlock.querySelector(`select[id="${selectId}"]`);
-                            if (select) {
-                                select.value = val;
-                                triggerMoodleEvents(select);
-                                actionCount++;
-                            }
-                        }
-                    }
-
-                    trackAnswer(qHash);
-                    button.innerText = `[Решено ИИ (${actionCount}) | ПЕРЕПРОВЕРИТЬ]`;
-                    makeRecheckBtnReady(button);
-                    Logger.add(`Вопрос ${qHash.substring(2, 8)} успешно решен через ${currentModel} (${actionCount} полей заполнено)`, 'success');
-
-                    if (AutoMode.isActive()) AutoMode.incAi();
-                    markDone();
-
-                } catch (e) {
-                    Logger.add(`Ошибка ИИ: ${e.message}`, 'error');
-                    sendAiRequest(payloadParts, modelsList, modelIndex + 1, questionBlock, button, qType, qHash, markDone);
-                }
+        dispatchModelRequest(
+            currentCfg,
+            promptText,
+            imagesForModel,
+            (result) => {
+                const actionCount = applyAiResult(result, questionBlock);
+                trackAnswer(qHash);
+                button.innerText = `[Решено ИИ (${actionCount}) | ПЕРЕПРОВЕРИТЬ]`;
+                makeRecheckBtnReady(button);
+                Logger.add(`Вопрос ${qHash.substring(2, 8)} решён через ${currentCfg.id} (${actionCount} полей)`, 'success');
+                if (AutoMode.isActive()) AutoMode.incAi();
+                markDone();
             },
-            ontimeout: () => {
-                Logger.add(`Модель ${currentModel} отвалилась по тайм-ауту. Переключаемся на следующую...`, 'warn');
-                sendAiRequest(payloadParts, modelsList, modelIndex + 1, questionBlock, button, qType, qHash, markDone);
-            },
-            onerror: (err) => {
-                Logger.add(`Сетевая ошибка API: ${err.statusText || 'Неизвестно'}`, 'error');
-                sendAiRequest(payloadParts, modelsList, modelIndex + 1, questionBlock, button, qType, qHash, markDone);
+            (isRateLimit = false) => {
+                const delay = isRateLimit ? Math.min(2500, (modelIndex + 1) * 500) : 150;
+                setTimeout(() => {
+                    sendAiRequest(promptText, validImages, modelsList, modelIndex + 1, questionBlock, button, qType, qHash, markDone);
+                }, delay);
             }
-        });
+        );
     }
 
     async function processQuestion(questionBlock, button, forceAi = false) {
@@ -860,7 +1154,6 @@
                     promptText += `Общий вопрос: "${qData.questionText}"\nЗадания:\n${qData.elements.map(e => `Селект ID: "${e.selectId}" для вопроса: "${e.subQuestion}"\nОпции:\n${e.options.map(o => `  - Value: "${o.value}" -> "${o.text}"`).join('\n')}`).join('\n\n')}\n\nВыведи: {"type": "match", "mappings": {"Селект_ID": "Выбранное_Value"}}`;
                 }
 
-                // Сбор картинок
                 const imgElements = questionBlock.querySelectorAll('.qtext img, .answer img');
                 let imagePromises = [];
                 imgElements.forEach(img => {
@@ -878,20 +1171,17 @@
                             }
                         }
                     } catch (imgErr) {
-                        Logger.add(`Пропущен поврежденный URL картинки`, 'warn');
+                        Logger.add('Пропущен повреждённый URL картинки', 'warn');
                     }
                 });
 
-                const selectedModel = RoutingManager.selectModel(questionBlock, qType);
-                const modelsToTry = selectedModel === MODEL_FLASH ? [MODEL_FLASH, MODEL_LITE] : [MODEL_LITE, MODEL_FLASH];
+                const modelsChain = RoutingManager.buildChain(questionBlock, qType);
 
                 Promise.all(imagePromises).then(downloadedImages => {
                     const validImages = downloadedImages.filter(img => img !== null);
-                    let payloadParts = [{ text: promptText }];
-                    validImages.forEach(imgData => { payloadParts.push({ inlineData: { mimeType: imgData.mimeType, data: imgData.data } }); });
-                    sendAiRequest(payloadParts, modelsToTry, 0, questionBlock, button, qType, qHash, markDone);
+                    sendAiRequest(promptText, validImages, modelsChain, 0, questionBlock, button, qType, qHash, markDone);
                 }).catch(() => {
-                    sendAiRequest([{ text: promptText }], [MODEL_LITE, MODEL_FLASH], 0, questionBlock, button, qType, qHash, markDone);
+                    sendAiRequest(promptText, [], modelsChain, 0, questionBlock, button, qType, qHash, markDone);
                 });
             };
 
@@ -900,7 +1190,6 @@
                 return;
             }
 
-            // Поиск в Firebase
             GM_xmlhttpRequest({
                 method: "GET",
                 url: `${FIREBASE_URL}questions/${qHash}.json`,
@@ -1167,7 +1456,7 @@
             btn.addEventListener('click', () => {
                 if (btn.classList.contains('recheck-ready')) {
                     Logger.add('Запрос принудительной перепроверки вопроса через ИИ...', 'warn');
-                    processQuestion(q, btn, true); // forceAi = true
+                    processQuestion(q, btn, true);
                 } else {
                     processQuestion(q, btn, false);
                 }
@@ -1176,7 +1465,6 @@
         });
     }
 
-    // Роутинг инициализации в зависимости от URL страницы
     if (window.location.href.includes('review.php')) {
         showInitialLoader();
         if (document.readyState === 'complete') {
@@ -1185,10 +1473,8 @@
             window.addEventListener('load', runReviewAndSave);
         }
     } else {
-        // Запуск интерфейса настроек на страницах курсов и разделов Moodle
         createUI();
 
-        // Полноценный разбор и автоматизация только на странице решения попытки
         if (window.location.href.includes('attempt.php')) {
             addButtons();
 
