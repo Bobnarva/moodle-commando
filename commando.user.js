@@ -30,8 +30,8 @@
     const KEY_LOGS_EXPANDED = 'commando_logs_expanded';
 
     // Модели
-    const MODEL_LITE = 'gemini-3.1-flash-lite';
-    const MODEL_FLASH = 'gemini-3.5-flash';
+    const MODEL_LITE = 'gemini-3.8-flash';
+    const MODEL_FLASH = 'gemini-4-hydrogen';
 
     let activeRequestsOnPage = 0;
 
